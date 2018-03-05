@@ -63,8 +63,8 @@ class SerialSpawn(SpawnBase):
     else:
         crlf = '\n'
 
-    def __init__(self, ser, args=None, timeout=30, maxread=2000, searchwindowsize=None,
-                 logfile=None, encoding=None, codec_errors='strict'):
+    def __init__(self, ser, timeout=10, maxread=2000, searchwindowsize=None, logfile=None, encoding=None, 
+                codec_errors='strict'):
         '''This takes a serial of pyserial as input. Please make sure the serial is open
         before creating SerialSpawn.'''
         super(SerialSpawn, self).__init__(timeout, maxread, searchwindowsize, logfile,
@@ -87,7 +87,9 @@ class SerialSpawn(SpawnBase):
         self._read_thread = threading.Thread(target=self._read_incoming)
         self._read_thread.setDaemon(True)
         self._read_thread.start()
+        self.PROMPT = None
 
+    def init_linux_prompt(self, auto_prompt_reset=True, sync_multiplier=1):
         # used to match the command-line prompt
         self.UNIQUE_PROMPT = r"\[PEXPECT\][\$\#] "
         self.PROMPT = self.UNIQUE_PROMPT
@@ -95,8 +97,24 @@ class SerialSpawn(SpawnBase):
         self.PROMPT_SET_SH = r"PS1='[PEXPECT]\$ '"
         self.PROMPT_SET_CSH = r"set prompt='[PEXPECT]\$ '"
 
+        if not self.sync_original_prompt(sync_multiplier):
+            self.close()
+            raise ExceptionSerialSpawn('could not synchronize with original prompt')
+        # We appear to be in.
+        # set shell prompt to something unique.
+        if auto_prompt_reset:
+            if not self.set_unique_prompt():
+                self.close()
+                raise ExceptionSerialSpawn('could not set shell prompt '
+                                     '(received: %r, expected: %r).' % (
+                                         self.before, self.PROMPT,))
+        return True
+
     def set_prompt(self, new_prompt):
         self.PROMPT = new_prompt
+
+    def get_prompt(self):
+        return self.PROMPT
 
     def set_linesep(self, sep='\r\n'):
         self.linesep = sep.encode('utf-8')
@@ -180,7 +198,7 @@ class SerialSpawn(SpawnBase):
         b = self._encoder.encode(s, final=False)
         return self.ser.write(b)
 
-    def sendline(self, s):
+    def sendline(self, s=""):
         "Write to fd with trailing newline, return number of bytes written"
         s = self._coerce_send_string(s)
         return self.send(s + self.linesep)
@@ -221,14 +239,6 @@ class SerialSpawn(SpawnBase):
             return False
         return True
 
-    def search_last_prompt(self):
-        '''
-        Sometimes, there are more than one prompt are read at beginning.
-        Skip them.This will take a long time as it must reach the timeout.
-        '''
-        while not self.prompt(1):
-            pass
-
     def set_unique_prompt(self):
         '''This only used when the serial interface is linux terminal.
         This sets the remote prompt to something more unique than ``#`` or ``$``.
@@ -243,3 +253,95 @@ class SerialSpawn(SpawnBase):
             if i == 0:
                 return False
         return True
+
+    def levenshtein_distance(self, a, b):
+        '''This calculates the Levenshtein distance between a and b.
+        '''
+
+        n, m = len(a), len(b)
+        if n > m:
+            a,b = b,a
+            n,m = m,n
+        current = range(n+1)
+        for i in range(1,m+1):
+            previous, current = current, [i]+[0]*n
+            for j in range(1,n+1):
+                add, delete = previous[j]+1, current[j-1]+1
+                change = previous[j-1]
+                if a[j-1] != b[i-1]:
+                    change = change + 1
+                current[j] = min(add, delete, change)
+        return current[n]
+
+
+    def try_read_prompt(self, timeout_multiplier):
+        '''This facilitates using communication timeouts to perform
+        synchronization as quickly as possible, while supporting high latency
+        connections with a tunable worst case performance. Fast connections
+        should be read almost immediately. Worst case performance for this
+        method is timeout_multiplier * 3 seconds.
+        '''
+
+        # maximum time allowed to read the first response
+        first_char_timeout = timeout_multiplier * 0.5
+
+        # maximum time allowed between subsequent characters
+        inter_char_timeout = timeout_multiplier * 0.5
+
+        # maximum time for reading the entire prompt
+        total_timeout = timeout_multiplier * 2.0
+
+        prompt = self.string_type()
+        begin = time.time()
+        expired = 0.0
+        timeout = first_char_timeout
+
+        while expired < total_timeout:
+            try:
+                prompt += self.read_nonblocking(size=1, timeout=timeout)
+                expired = time.time() - begin # updated total time expired
+                timeout = inter_char_timeout
+            except TIMEOUT:
+                break
+
+        return prompt
+
+    def sync_original_prompt (self, sync_multiplier=1, do_clear=False):
+        '''This attempts to find the prompt. Basically, press enter and record
+        the response; press enter again and record the response; if the two
+        responses are similar then assume we are at the original prompt.
+        This can be a slow function. Worst case with the default sync_multiplier
+        can take 4.5 seconds. Low latency connections are more likely to fail
+        with a low sync_multiplier. Best case sync time gets worse with a
+        high sync multiplier (500 ms with default). '''
+
+        # All of these timing pace values are magic.
+        # I came up with these based on what seemed reliable for
+        # connecting to a heavily loaded machine I have.
+
+        if do_clear:
+            try:
+                # Clear the buffer before getting the prompt.
+                self.sendline()
+                time.sleep(0.1)
+                self.try_read_prompt(sync_multiplier)
+
+            except TIMEOUT:
+                pass
+
+        self.sendline()
+        x = self.try_read_prompt(sync_multiplier)
+
+        self.sendline()
+        a = self.try_read_prompt(sync_multiplier)
+
+        self.sendline()
+        b = self.try_read_prompt(sync_multiplier)
+
+        ld = self.levenshtein_distance(a,b)
+        len_a = len(a)
+        if len_a == 0:
+            return False
+        if float(ld)/len_a < 0.4:
+            return b
+        return False
