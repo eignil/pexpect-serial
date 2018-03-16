@@ -154,9 +154,8 @@ class SerialSpawn(SpawnBase):
             timeout = self.timeout
         elif timeout is None:
             timeout = 1e6
-
         t0 = time.time()
-        while (time.time() - t0) < timeout and size and len(buf) < size:
+        while size and len(buf) < size:
             try:
                 incoming = self._read_queue.get_nowait()
             except Empty:
@@ -167,11 +166,25 @@ class SerialSpawn(SpawnBase):
                     break
 
                 buf += self._decoder.decode(incoming, final=False)
-
+            if (time.time() - t0) > timeout:
+                break
+                #raise TIMEOUT("read data from queue timeout.")
         r, self._buf = buf[:size], buf[size:]
 
         self._log(r, 'read')
         return r
+
+    def read_valid(self, size, timeout=1):
+        t0 = time.time()
+        while True:
+            res = self.read_nonblocking(size,timeout)
+            if res:
+                return res
+            elif time.time() - t0 > timeout:
+                raise TIMEOUT("Read valid data timeout "+ str(timeout))
+            time.sleep(0.01)
+
+
 
     def _read_incoming(self):
         """Run in a thread to move output from a pipe to a queue."""
@@ -298,13 +311,15 @@ class SerialSpawn(SpawnBase):
 
         while expired < total_timeout:
             try:
-                prompt += self.read_nonblocking(size=1, timeout=timeout)
+                cur_read = self.read_valid(size=1, timeout=timeout)
+                prompt += cur_read
                 expired = time.time() - begin # updated total time expired
                 timeout = inter_char_timeout
             except TIMEOUT:
                 break
-
+        #print("expired:%d, total_time:%s"%(expired,total_timeout))
         return prompt
+
 
     def sync_original_prompt (self, sync_multiplier=1, do_clear=False):
         '''This attempts to find the prompt. Basically, press enter and record
@@ -328,9 +343,6 @@ class SerialSpawn(SpawnBase):
 
             except TIMEOUT:
                 pass
-
-        self.sendline()
-        x = self.try_read_prompt(sync_multiplier)
 
         self.sendline()
         a = self.try_read_prompt(sync_multiplier)
