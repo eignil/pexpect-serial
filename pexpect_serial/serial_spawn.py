@@ -256,6 +256,7 @@ class SerialSpawn(SpawnBase):
         '''This only used when the serial interface is linux terminal.
         This sets the remote prompt to something more unique than ``#`` or ``$``.
         '''
+        self.init_linux_prompt()
         self.sendline("unset PROMPT_COMMAND")
         self.PROMPT = self.UNIQUE_PROMPT
         self.sendline(self.PROMPT_SET_SH)  # sh-style
