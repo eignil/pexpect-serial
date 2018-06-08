@@ -30,6 +30,7 @@ import threading
 import subprocess
 import sys
 import time
+import re
 
 
 try:
@@ -96,10 +97,14 @@ class SerialSpawn(SpawnBase):
         # used to set shell command-line prompt to UNIQUE_PROMPT.
         self.PROMPT_SET_SH = r"PS1='[PEXPECT]\$ '"
         self.PROMPT_SET_CSH = r"set prompt='[PEXPECT]\$ '"
-
-        if not self.sync_original_prompt(sync_multiplier):
+        sync_res = self.sync_original_prompt(sync_multiplier)
+        if not sync_res:
             self.close()
             raise ExceptionSerialSpawn('could not synchronize with original prompt')
+        sync_res = sync_res.decode().lstrip()
+        re_m = re.compile(self.PROMPT)
+        if re_m.match(sync_res):
+            return True
         # We appear to be in.
         # set shell prompt to something unique.
         if auto_prompt_reset:
@@ -207,8 +212,8 @@ class SerialSpawn(SpawnBase):
         "Write to serial, return number of bytes written"
         s = self._coerce_send_string(s)
         self._log(s, 'send')
-
         b = self._encoder.encode(s, final=False)
+        #print(b)
         return self.ser.write(b)
 
     def sendline(self, s=""):
@@ -247,6 +252,7 @@ class SerialSpawn(SpawnBase):
             patterns = [self.PROMPT, TIMEOUT]
         else:
             raise ExceptionSerialSpawn("Wrong PROMT:%s" % (str(self.PROMPT)))
+
         i = self.expect(patterns, timeout=timeout)
         if len(patterns)-1 == i:
             return False
@@ -256,7 +262,7 @@ class SerialSpawn(SpawnBase):
         '''This only used when the serial interface is linux terminal.
         This sets the remote prompt to something more unique than ``#`` or ``$``.
         '''
-        self.init_linux_prompt()
+        
         self.sendline("unset PROMPT_COMMAND")
         self.PROMPT = self.UNIQUE_PROMPT
         self.sendline(self.PROMPT_SET_SH)  # sh-style
